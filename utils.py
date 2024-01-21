@@ -160,18 +160,23 @@ def get_box_vertices(pose: torch.Tensor, focal_length: float, height=100, width=
     return box_vertices
 
 def select_frames_based_on_strategy(images, focal_length, tform_cam2world, device, strategy = "random", k = 10):
-
-  indices = list(range(images.shape[0]))
-  np.random.shuffle(indices)
   
-  if strategy == "random":
+  if strategy == "full":
+    training_images = images
+    training_tforms = tform_cam2world
 
+  elif strategy == "random":
+
+    indices = list(range(images.shape[0]))
+    np.random.shuffle(indices)
     training_indices = indices[:k]
     training_images = images[training_indices]
     training_tforms = tform_cam2world[training_indices]
 
-  if strategy == "fvs":
+  elif strategy == "fvs":
 
+    indices = list(range(images.shape[0]))
+    np.random.shuffle(indices)
     training_indices = indices[:1]
     holdout_indices = indices[1:]
     # defin holdout here
@@ -185,7 +190,7 @@ def select_frames_based_on_strategy(images, focal_length, tform_cam2world, devic
     training_images = torch.cat((training_images, holdout_images[furthest_view_indices]))
     training_tforms = torch.cat((training_tforms, holdout_tforms[furthest_view_indices]))
 
-  if strategy == "min_iou_3d":
+  elif strategy == "min_iou_3d":
     boxes = []
     for pose in tform_cam2world:
         boxes.append(get_box_vertices(pose, focal_length))
@@ -198,7 +203,7 @@ def select_frames_based_on_strategy(images, focal_length, tform_cam2world, devic
     training_images = images[min_iou_3d_indices]
     training_tforms = tform_cam2world[min_iou_3d_indices]
 
-  if strategy == "embedding":
+  elif strategy == "embedding":
 
     #best_dim_red_params = find_best_dim_red_params(images, embedding = "simple")
     embeddings = extract_features(images, device)
@@ -208,6 +213,9 @@ def select_frames_based_on_strategy(images, focal_length, tform_cam2world, devic
     diverse_indices = select_diverse_images_per_cluster(tform_cam2world, labels)
     training_images = images[diverse_indices]
     training_tforms = tform_cam2world[diverse_indices]
+  
+  else:
+    raise ValueError(f"Invalid strategy i.e. strategy = {strategy}. Valid strategies are: full, random, fvs, min_iou_3d, embedding")
 
   return training_images, training_tforms
 
