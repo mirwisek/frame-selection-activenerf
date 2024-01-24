@@ -65,9 +65,10 @@ def furthest_view_sampling_k(train_tform_c2w, holdout_tform_c2w, k, device):
     # Calculate the distance of each candidate to all camera positions in the training set   
     while len(furthest_candidates) < k-1:
       
-      # convert list of tensor to tensor
+      # calculate average position of training set
       avg_train_pos = torch.mean(training_positions, dim=0)
 
+      # calculate euclidean distance of each element in holdout_position to avg_train_pos
       euclidean_distance = torch.sqrt(torch.sum((holdout_position - avg_train_pos) ** 2, dim=1))
 
       # get index with largest distance
@@ -121,7 +122,8 @@ def get_fvs_cluster(cluster_camera_pos):
     indices = np.unravel_index(np.argmax(pairwise_distances), pairwise_distances.shape)
     return indices
 
-def select_diverse_images_per_cluster(tform_cam2world, labels):
+@DeprecationWarning
+def select_diverse_images_per_cluster_old(tform_cam2world, labels, k):
     """
     Select the most diverse image from each cluster based on cosine similarity.
     """
@@ -148,6 +150,59 @@ def select_diverse_images_per_cluster(tform_cam2world, labels):
 
     return selected_indices
 
+def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_length, k):
+    """
+    Select the most diverse image from each cluster based on cosine similarity.
+    """
+    unique_labels = set(labels)
+    selected_indices = []
+
+    n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+    items_per_cluster = k // n_clusters
+
+    if items_per_cluster == 0:
+        items_per_cluster = 1
+
+    for label in unique_labels:
+
+        if label == -1:
+            continue  # Skip noise
+
+        cluster_indices = [i for i, lbl in enumerate(labels) if lbl == label]
+        
+
+        if len(cluster_indices) > 1:
+            
+            if strategy == "fvs_distance":
+                cluster_camera_pos = [camera_position_from_extrinsic_matrix(transform).detach().cpu().numpy() for transform in tform_cam2world[cluster_indices]] 
+                torch_cc_pos = torch.tensor(cluster_camera_pos)
+                pairwise_distances = torch.cdist(torch_cc_pos, torch_cc_pos, p=2.0)
+                pairwise_distances_upper = torch.triu(pairwise_distances, diagonal=1)
+                pairwise_distances_upper[pairwise_distances_upper==0] = -torch.inf
+                _, top_indices = torch.topk(pairwise_distances_upper.flatten(), items_per_cluster, largest=True)
+                max_pairwise_distances_indices = torch.cat((top_indices // len(cluster_indices), top_indices % len(cluster_indices)), dim=0)
+                unique_indices = torch.unique(max_pairwise_distances_indices)
+                selected_indices.extend([cluster_indices[idx] for idx in unique_indices])
+            
+            elif strategy == "fvs_iou_3d":
+
+                boxes = []
+                for idx in cluster_indices:
+                    boxes.append(get_box_vertices(tform_cam2world[idx], focal_length))
+                boxes = torch.stack(boxes, dim=0)
+                _, iou_3d = box3d_overlap(boxes, boxes)
+                iou_3d_upper = torch.triu(iou_3d, diagonal=1)
+                iou_3d_upper[iou_3d_upper==0] = 2.0
+                _, top_indices = torch.topk(iou_3d_upper.flatten(), items_per_cluster, largest=False)
+                min_iou_3d_indices = torch.cat((top_indices // len(cluster_indices), top_indices % len(cluster_indices)), dim=0)
+                unique_indices = torch.unique(min_iou_3d_indices)
+                selected_indices.extend([cluster_indices[idx] for idx in unique_indices])
+                
+        else:
+            selected_indices.append(cluster_indices[0])
+        
+    return selected_indices[:k]
+
 def get_box_vertices(pose: torch.Tensor, focal_length: float, height=100, width=100, near_thresh=2.0, far_thresh=6.0):
     """Compute the vertices of the bounding box (in 3D) defined by the near_thresh and far_thresh values."""
 	 
@@ -159,7 +214,7 @@ def get_box_vertices(pose: torch.Tensor, focal_length: float, height=100, width=
 	
     return box_vertices
 
-def select_frames_based_on_strategy(images, focal_length, tform_cam2world, device, strategy = "random", k = 10):
+def select_frames_based_on_strategy(images, focal_length, tform_cam2world, device, strategy = "random", embed_strategy = "fvs_distance", k = 10):
   
   if strategy == "full":
     training_images = images
@@ -198,10 +253,11 @@ def select_frames_based_on_strategy(images, focal_length, tform_cam2world, devic
     _, iou_3d = box3d_overlap(boxes, boxes)
     iou_3d_upper = torch.triu(iou_3d, diagonal=1)
     iou_3d_upper[iou_3d_upper==0] = 2.0
-    _, top_indices = torch.topk(iou_3d_upper.flatten(), k//2, largest=False)
+    _, top_indices = torch.topk(iou_3d_upper.flatten(), k, largest=False)
     min_iou_3d_indices = torch.cat((top_indices % 100, top_indices // 100), dim=0)
-    training_images = images[min_iou_3d_indices]
-    training_tforms = tform_cam2world[min_iou_3d_indices]
+    min_iou_3d_indices_k = min_iou_3d_indices[:k]
+    training_images = images[min_iou_3d_indices_k]
+    training_tforms = tform_cam2world[min_iou_3d_indices_k]
 
   elif strategy == "embedding":
 
@@ -210,7 +266,7 @@ def select_frames_based_on_strategy(images, focal_length, tform_cam2world, devic
     #labels = DBSCAN(eps=0.7, min_samples=3).fit_predict(embeddings)
     #parameters = find_best_hdbscan_params(embeddings)
     labels = HDBSCAN(min_cluster_size=6, min_samples=2).fit_predict(embeddings)
-    diverse_indices = select_diverse_images_per_cluster(tform_cam2world, labels)
+    diverse_indices = select_diverse_images_per_cluster(tform_cam2world, labels, embed_strategy, focal_length, k)
     training_images = images[diverse_indices]
     training_tforms = tform_cam2world[diverse_indices]
   
