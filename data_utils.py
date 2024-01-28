@@ -7,7 +7,7 @@ import torchvision.transforms.functional as TF
 
 def get_focal_length(image_width, camera_angle_x):
   focal_length = image_width / (2 * np.tan(camera_angle_x / 2))
-  return np.array([focal_length])
+  return np.array(focal_length)
 
 
 def load_tiny_nerf_data(path, device):

@@ -1,5 +1,7 @@
+import umap
 import torch
 import numpy as np
+from umap import umap_
 from hdbscan import HDBSCAN
 from matplotlib import pyplot as plt
 from nerf_utils import get_ray_bundle
@@ -51,7 +53,20 @@ def camera_position_from_extrinsic_matrix(extrinsic_matrix):
     camera_position = -torch.inverse(R) @ t
     return camera_position
 
-def furthest_view_sampling_k(train_tform_c2w, holdout_tform_c2w, k, device):
+def furthest_view_sampling_k(tform_cam2world, k = 10, seed = 9458):
+
+    # shuffle indices of tform_cam2world multiple times
+    indices = np.arange(tform_cam2world.shape[0])
+    np.random.seed(seed)
+    np.random.shuffle(indices)
+
+    # take 1 random sample for trainnig and rest for holdout
+    training_indices = indices[:1]
+    holdout_indices = indices[1:]
+
+    train_tform_c2w = tform_cam2world[training_indices]
+    holdout_tform_c2w = tform_cam2world[holdout_indices]
+
     # Calculate camera positions for the training set and holdout
     training_positions = [camera_position_from_extrinsic_matrix(transform) for transform in train_tform_c2w]
     holdout_position = [camera_position_from_extrinsic_matrix(transform) for transform in holdout_tform_c2w]
@@ -63,92 +78,85 @@ def furthest_view_sampling_k(train_tform_c2w, holdout_tform_c2w, k, device):
     furthest_candidates = []
 
     # Calculate the distance of each candidate to all camera positions in the training set   
-    while len(furthest_candidates) < k-1:
+    while len(furthest_candidates) < k:
       
-      # calculate average position of training set
       avg_train_pos = torch.mean(training_positions, dim=0)
-
-      # calculate euclidean distance of each element in holdout_position to avg_train_pos
       euclidean_distance = torch.sqrt(torch.sum((holdout_position - avg_train_pos) ** 2, dim=1))
-
-      # get index with largest distance
       max_index = torch.argmax(euclidean_distance).item()
-
-      # get element with largest distance
       max_element = holdout_position[max_index]
-
-      # remove element from holdout_position
       holdout_position = torch.cat((holdout_position[:max_index], holdout_position[max_index+1:]))
-      
-      # get index of element from holdout_position_orig      
-      
       max_element_index = torch.where(torch.all(torch.eq(holdout_position_orig, max_element), dim=1))[0].item()
-
       furthest_candidates.append(max_element_index)
-
-      # Append the training_positions with maximum distance
       training_positions = torch.cat((training_positions, torch.unsqueeze(max_element, 0)))
       
     return furthest_candidates
 
-def extract_features(image_array, device):
-  # Instantiate the ImageEncoder
-  image_encoder = ImageEncoder(device)
+def select_frames_using_min_3d_iou_greedy(tform_cam2world, focal_length, k = 10, seed = 9458):
 
-  # Get the embeddings
-  embeddings = image_encoder(image_array)
+    # shuffle indices of tform_cam2world multiple times
+    indices = np.arange(tform_cam2world.shape[0])
+    np.random.seed(seed)
+    np.random.shuffle(indices)
 
-  # Perform PCA for dimensionality reduction
-  #  pca = PCA(n_components=10)
+    # take 1 random sample for trainnig and rest for holdout
+    training_indices = indices[:1]
+    holdout_indices = indices[1:]
+
+    # get box vertices for training and holdout
+    training_tforms = tform_cam2world[training_indices].squeeze()
+    holdout_tforms = tform_cam2world[holdout_indices].squeeze()
+    training_box = get_box_vertices(training_tforms.squeeze(), focal_length)
+    holdout_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in holdout_tforms])
+
+    # calculate 3d iou between training and holdout 
+    _, iou_3d = box3d_overlap(training_box.unsqueeze(0), holdout_boxes)
+    min_iou_index = torch.argmin(iou_3d.squeeze()).item()
+
+    # add new index with minimum 3d iou to training indices
+    training_indices = np.append(training_indices, holdout_indices[min_iou_index])
+    holdout_indices = np.delete(holdout_indices, min_iou_index)
+        
+    for i in range(k-2):
+
+        # get new poses based on minimum 3d iou
+        training_tforms = tform_cam2world[training_indices].squeeze()
+        holdout_tforms = tform_cam2world[holdout_indices].squeeze()
+        
+        # get box vertices for training and holdout
+        training_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in training_tforms])
+        holdout_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in holdout_tforms])
+
+        # calculate 3d iou between training and holdout
+        _, iou_3d = box3d_overlap(training_boxes, holdout_boxes)
+        
+        # get holdout index with minimum 3d iou value for each training box
+        min_iou_values, min_iou_indices = torch.min(iou_3d, dim=1) # torch.Size([training_boxes])
+
+        # get next holdout index with minimum 3d iou value
+        min_iou_value_idx = torch.argmin(min_iou_values).item()
+        min_iou_indices_index = min_iou_indices[min_iou_value_idx].item() # torch.Size([1])
+        
+        # add new index with minimum 3d iou to training indices
+        training_indices = np.append(training_indices, holdout_indices[min_iou_indices_index])
+        holdout_indices = np.delete(holdout_indices, min_iou_indices_index)
+    
+    return training_indices
+
+def extract_features(embeddings, dim_red_method = "pca", pca_dims = 5, umap_params=[]):
 
   image_embd = embeddings.squeeze().contiguous().view(embeddings.size(0), -1).cpu().detach().numpy()
 
-  pca = PCA(n_components=5)
-  #umap_reducer = umap.UMAP(n_neighbors=5, n_components=5, min_dist = 0.5)
+  # Perform PCA for dimensionality reduction
+  if dim_red_method == "pca":
+    pca_reducer = PCA(n_components=pca_dims)
+    reduced_img_embd = pca_reducer.fit_transform(image_embd)
+  elif dim_red_method == "umap":
+    umap_reducer = umap_.UMAP(n_neighbors=umap_params[0], min_dist=umap_params[1], n_components=umap_params[2])
+    reduced_img_embd = umap_reducer.fit_transform(image_embd)
+  else:
+    raise ValueError(f"Invalid dimension reduction method. Valid methods are: pca, umap")
 
-  reduced_img_embd = pca.fit_transform(image_embd)
-  #reduced_img_embd = umap_reducer.fit_transform(image_embd)
-
-  scaler = StandardScaler()
-  scaled_red_img_emb = scaler.fit_transform(reduced_img_embd)
-
-  return scaled_red_img_emb
-
-def euclidean_distance(vec1, vec2):
-    return np.linalg.norm(vec1 - vec2, ord=2)
-
-def get_fvs_cluster(cluster_camera_pos):
-    pairwise_distances = squareform(pdist(cluster_camera_pos))
-    indices = np.unravel_index(np.argmax(pairwise_distances), pairwise_distances.shape)
-    return indices
-
-@DeprecationWarning
-def select_diverse_images_per_cluster_old(tform_cam2world, labels, k):
-    """
-    Select the most diverse image from each cluster based on cosine similarity.
-    """
-    unique_labels = set(labels)
-    selected_indices = []
-
-    for label in unique_labels:
-
-        if label == -1:
-            continue  # Skip noise
-
-        cluster_indices = [i for i, lbl in enumerate(labels) if lbl == label]
-        cluster_camera_pos = [camera_position_from_extrinsic_matrix(transform).detach().cpu().numpy() for transform in tform_cam2world[cluster_indices]]
-
-        if len(cluster_indices) > 1:
-            
-            pairwise_distances = squareform(pdist(cluster_camera_pos))
-            indices = np.unravel_index(np.argmax(pairwise_distances), pairwise_distances.shape)
-            selected_indices.append(cluster_indices[indices[0]])
-            selected_indices.append(cluster_indices[indices[1]])
-
-        else:
-            selected_indices.append(cluster_indices[0])
-
-    return selected_indices
+  return reduced_img_embd
 
 def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_length, k):
     """
@@ -158,10 +166,10 @@ def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_l
     selected_indices = []
 
     n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-    items_per_cluster = k // n_clusters
+    n_clusters = 1 if n_clusters == 0 else n_clusters
 
-    if items_per_cluster == 0:
-        items_per_cluster = 1
+    items_per_cluster = k // n_clusters
+    items_per_cluster = 1 if items_per_cluster == 0 else items_per_cluster
 
     for label in unique_labels:
 
@@ -169,10 +177,8 @@ def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_l
             continue  # Skip noise
 
         cluster_indices = [i for i, lbl in enumerate(labels) if lbl == label]
-        
 
-        if len(cluster_indices) > 1:
-            
+        if len(cluster_indices) > 1:       
             if strategy == "fvs_distance":
                 cluster_camera_pos = [camera_position_from_extrinsic_matrix(transform).detach().cpu().numpy() for transform in tform_cam2world[cluster_indices]] 
                 torch_cc_pos = torch.tensor(cluster_camera_pos)
@@ -185,7 +191,6 @@ def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_l
                 selected_indices.extend([cluster_indices[idx] for idx in unique_indices])
             
             elif strategy == "fvs_iou_3d":
-
                 boxes = []
                 for idx in cluster_indices:
                     boxes.append(get_box_vertices(tform_cam2world[idx], focal_length))
@@ -214,66 +219,56 @@ def get_box_vertices(pose: torch.Tensor, focal_length: float, height=100, width=
 	
     return box_vertices
 
-def select_frames_based_on_strategy(images, focal_length, tform_cam2world, device, strategy = "random", embed_strategy = "fvs_distance", k = 10):
+def select_frames_from_baseline(images, focal_length, tform_cam2world, baseline = "random", k = 10, seed = 9458):
   
-  if strategy == "full":
+  if baseline == "full":
     training_images = images
     training_tforms = tform_cam2world
 
-  elif strategy == "random":
+  elif baseline == "random":
 
     indices = list(range(images.shape[0]))
+    np.random.seed(seed)
     np.random.shuffle(indices)
     training_indices = indices[:k]
     training_images = images[training_indices]
     training_tforms = tform_cam2world[training_indices]
 
-  elif strategy == "fvs":
+  elif baseline == "fvs":
 
-    indices = list(range(images.shape[0]))
-    np.random.shuffle(indices)
-    training_indices = indices[:1]
-    holdout_indices = indices[1:]
-    # defin holdout here
-    training_images = images[training_indices]
-    training_tforms = tform_cam2world[training_indices]
-    
-    holdout_images = images[holdout_indices]
-    holdout_tforms = tform_cam2world[holdout_indices]
+    furthest_view_indices = furthest_view_sampling_k(tform_cam2world, k, seed)
+    training_images = images[furthest_view_indices]
+    training_tforms = tform_cam2world[furthest_view_indices]
 
-    furthest_view_indices = furthest_view_sampling_k(training_tforms, holdout_tforms, k, device)
-    training_images = torch.cat((training_images, holdout_images[furthest_view_indices]))
-    training_tforms = torch.cat((training_tforms, holdout_tforms[furthest_view_indices]))
+  elif baseline == "min_iou_3d":
+      
+      min_iou_3d_indices = select_frames_using_min_3d_iou_greedy(tform_cam2world, focal_length, k, seed)
+      training_images = images[min_iou_3d_indices]
+      training_tforms = tform_cam2world[min_iou_3d_indices]
 
-  elif strategy == "min_iou_3d":
-    boxes = []
-    for pose in tform_cam2world:
-        boxes.append(get_box_vertices(pose, focal_length))
-    boxes = torch.stack(boxes, dim=0)
-    _, iou_3d = box3d_overlap(boxes, boxes)
-    iou_3d_upper = torch.triu(iou_3d, diagonal=1)
-    iou_3d_upper[iou_3d_upper==0] = 2.0
-    _, top_indices = torch.topk(iou_3d_upper.flatten(), k, largest=False)
-    min_iou_3d_indices = torch.cat((top_indices % 100, top_indices // 100), dim=0)
-    min_iou_3d_indices_k = min_iou_3d_indices[:k]
-    training_images = images[min_iou_3d_indices_k]
-    training_tforms = tform_cam2world[min_iou_3d_indices_k]
-
-  elif strategy == "embedding":
-
-    #best_dim_red_params = find_best_dim_red_params(images, embedding = "simple")
-    embeddings = extract_features(images, device)
-    #labels = DBSCAN(eps=0.7, min_samples=3).fit_predict(embeddings)
-    #parameters = find_best_hdbscan_params(embeddings)
-    labels = HDBSCAN(min_cluster_size=6, min_samples=2).fit_predict(embeddings)
-    diverse_indices = select_diverse_images_per_cluster(tform_cam2world, labels, embed_strategy, focal_length, k)
-    training_images = images[diverse_indices]
-    training_tforms = tform_cam2world[diverse_indices]
-  
   else:
-    raise ValueError(f"Invalid strategy i.e. strategy = {strategy}. Valid strategies are: full, random, fvs, min_iou_3d, embedding")
+    raise ValueError(f"Invalid strategy i.e. baseline = {baseline}. Valid strategies are: full, random, fvs, min_iou_3d, embedding")
 
   return training_images, training_tforms
+
+def select_frames_from_clustering(embeddings, tform_cam2world, focal_length, **kwargs):
+  # Get the embeddings
+
+  embeddings = extract_features(embeddings,
+                                dim_red_method = kwargs.get("dim_red_method","pca"), 
+                                umap_params=kwargs.get("umap_params", [5, 0.1, 5]))
+
+  # Get the labels
+  labels = HDBSCAN(min_cluster_size=kwargs.get("min_cluster_size",6),
+                   min_samples=kwargs.get("min_samples",2)).fit_predict(embeddings)
+
+  # Select the frames
+  diverse_indices = select_diverse_images_per_cluster(tform_cam2world, labels, 
+                                                      kwargs.get("strategy","fvs_distance"), 
+                                                      focal_length, 
+                                                      kwargs.get("k", 10))
+
+  return diverse_indices
 
 def calculate_lpips(img1, img2, device):
   # Function to calculate LPIPS
