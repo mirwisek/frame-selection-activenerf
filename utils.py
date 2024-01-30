@@ -1,6 +1,7 @@
 import umap
 import torch
 import numpy as np
+from math import ceil
 from umap import umap_
 from hdbscan import HDBSCAN
 from matplotlib import pyplot as plt
@@ -71,25 +72,26 @@ def furthest_view_sampling_k(tform_cam2world, k = 10, seed = 9458):
     training_positions = [camera_position_from_extrinsic_matrix(transform) for transform in train_tform_c2w]
     holdout_position = [camera_position_from_extrinsic_matrix(transform) for transform in holdout_tform_c2w]
     training_positions = torch.stack(training_positions)
-    holdout_position_orig = torch.stack(holdout_position)
     holdout_position = torch.stack(holdout_position)
 
-    # Initialize a list to hold the furthest candidates
-    furthest_candidates = []
-
     # Calculate the distance of each candidate to all camera positions in the training set   
-    while len(furthest_candidates) < k:
+    for i in range(k-1):
       
       avg_train_pos = torch.mean(training_positions, dim=0)
       euclidean_distance = torch.sqrt(torch.sum((holdout_position - avg_train_pos) ** 2, dim=1))
       max_index = torch.argmax(euclidean_distance).item()
-      max_element = holdout_position[max_index]
-      holdout_position = torch.cat((holdout_position[:max_index], holdout_position[max_index+1:]))
-      max_element_index = torch.where(torch.all(torch.eq(holdout_position_orig, max_element), dim=1))[0].item()
-      furthest_candidates.append(max_element_index)
-      training_positions = torch.cat((training_positions, torch.unsqueeze(max_element, 0)))
       
-    return furthest_candidates
+      # add index to training indices and remove from holdout indices
+      training_indices = np.append(training_indices, holdout_indices[max_index])
+      holdout_indices = np.delete(holdout_indices, max_index)
+
+      train_tform_c2w = tform_cam2world[training_indices]
+      holdout_tform_c2w = tform_cam2world[holdout_indices]
+
+      training_positions = torch.stack([camera_position_from_extrinsic_matrix(transform) for transform in train_tform_c2w])
+      holdout_position = torch.stack([camera_position_from_extrinsic_matrix(transform) for transform in holdout_tform_c2w])
+      
+    return training_indices
 
 def select_frames_using_min_3d_iou_greedy(tform_cam2world, focal_length, k = 10, seed = 9458):
 
@@ -168,7 +170,7 @@ def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_l
     n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
     n_clusters = 1 if n_clusters == 0 else n_clusters
 
-    items_per_cluster = k // n_clusters
+    items_per_cluster = ceil(k / n_clusters)
     items_per_cluster = 1 if items_per_cluster == 0 else items_per_cluster
 
     for label in unique_labels:
@@ -182,14 +184,30 @@ def select_diverse_images_per_cluster(tform_cam2world, labels, strategy, focal_l
             if strategy == "fvs_distance":
                 cluster_camera_pos = [camera_position_from_extrinsic_matrix(transform).detach().cpu().numpy() for transform in tform_cam2world[cluster_indices]] 
                 torch_cc_pos = torch.tensor(cluster_camera_pos)
-                pairwise_distances = torch.cdist(torch_cc_pos, torch_cc_pos, p=2.0)
-                pairwise_distances_upper = torch.triu(pairwise_distances, diagonal=1)
-                pairwise_distances_upper[pairwise_distances_upper==0] = -torch.inf
-                _, top_indices = torch.topk(pairwise_distances_upper.flatten(), items_per_cluster, largest=True)
-                max_pairwise_distances_indices = torch.cat((top_indices // len(cluster_indices), top_indices % len(cluster_indices)), dim=0)
-                unique_indices = torch.unique(max_pairwise_distances_indices)
-                selected_indices.extend([cluster_indices[idx] for idx in unique_indices])
-            
+                cluster_centroid = torch.mean(torch_cc_pos, dim=0)
+                distances = torch.norm(torch_cc_pos - cluster_centroid, dim=1)
+                max_index = torch.argmax(distances).item()
+                if items_per_cluster == 1:
+                    selected_indices.append(cluster_indices[max_index])
+                    continue
+                else:
+                    candidates = [cluster_indices[max_index]]
+                    candidates_pos = torch.tensor(list(cluster_camera_pos[max_index])).unsqueeze(0)
+                    cluster_camera_pos.pop(max_index)
+                    cluster_indices.pop(max_index)
+                    torch_cc_pos = torch.tensor(cluster_camera_pos)
+
+                    while len(candidates) < items_per_cluster:
+                        avg_candidate_dist = torch.mean(candidates_pos, dim=0)
+                        euclidean_distance = torch.sqrt(torch.sum((torch_cc_pos - avg_candidate_dist) ** 2, dim=1))
+                        max_index = torch.argmax(euclidean_distance).item()
+                        candidates.append(cluster_indices[max_index])
+                        candidates_pos = torch.cat((candidates_pos, torch.unsqueeze(torch_cc_pos[max_index], 0)))
+                        cluster_camera_pos.pop(max_index)
+                        cluster_indices.pop(max_index)
+                        torch_cc_pos = torch.tensor(cluster_camera_pos)
+                    selected_indices.extend(candidates)
+                          
             elif strategy == "fvs_iou_3d":
                 boxes = []
                 for idx in cluster_indices:
