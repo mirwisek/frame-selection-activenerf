@@ -7,12 +7,104 @@ from hdbscan import HDBSCAN
 from matplotlib import pyplot as plt
 from nerf_utils import get_ray_bundle
 from image_encoder import ImageEncoder
-from pytorch3d.ops import box3d_overlap
+# from pytorch3d.ops import box3d_overlap
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import pdist, squareform
 from skimage.metrics import structural_similarity as SSIM
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
+import os
+from sklearn.cluster import KMeans
+
+extrinsic_intrinsic_logs_path = f'./logs/extrinsic_vs_intrinsic'
+
+def plot_3d_camera_positions(camera_positions, selected_positions, title, labels = None, color='red', save_path=None):
+    """
+    camera_positions: The transformation matrices of the cameras from the dataset
+    selected_positions: The transformation matrices of the cameras that need to be highlighted
+    title: The title of the plot
+    labels: If clustered, use this to depict colors of clusters
+    color: The color of the selected cameras in the plot
+
+    Plot the camera positions in 3D space, coloring them based on their cluster.	
+    """
+
+    # Plot the camera positions in 3D space, coloring them based on their cluster
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    scatter = ax.scatter(camera_positions[:, 0], camera_positions[:, 1], camera_positions[:, 2], c=labels, cmap='viridis')
+
+    ax.scatter(selected_positions[:, 0], selected_positions[:, 1], selected_positions[:, 2], c=color, marker='o', s=50)  # s is the size of the marker
+
+    ax.set_xlabel('X Axis')
+    ax.set_ylabel('Y Axis')
+    ax.set_zlabel('Z Axis')
+    ax.set_title(title)
+    if labels is not None:
+        legend = ax.legend(*scatter.legend_elements(), title="Clusters")
+        ax.add_artist(legend)
+
+    if save_path:
+      if not os.path.exists(extrinsic_intrinsic_logs_path):
+        os.makedirs(extrinsic_intrinsic_logs_path)
+      plt.savefig(f"{extrinsic_intrinsic_logs_path}/{save_path}")
+
+    plt.show()
+
+
+
+
+def plot_images_as_grid(images_tensor, save_path=None):
+    
+    """
+    images: The indices of the images to be plotted
+    """
+    fig, axs = plt.subplots(2, 5, figsize=(10, 6))
+
+    # Loop through all axes and images
+    for ax, image in zip(axs.ravel(), images_tensor):
+        ax.imshow(image.detach().cpu().numpy(), cmap='viridis')  # You can change the colormap if needed
+        ax.axis('off')  # Turn off axis
+
+    plt.tight_layout()
+    if save_path:
+       if not os.path.exists(extrinsic_intrinsic_logs_path):
+        os.makedirs(extrinsic_intrinsic_logs_path)
+       plt.savefig(f"{extrinsic_intrinsic_logs_path}/{save_path}")
+    plt.show()
+
+
+def cluster_poses_by_kmeans(train_poses, title, n_clusters = 10, save_path = None):
+  """
+  
+  """
+  # Apply K-Means Clustering to find 10 clusters
+  kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(train_poses)
+  labels = kmeans.labels_
+
+  # Calculate centroids of each cluster
+  centroids = []
+  for i in range(n_clusters):
+      cluster_points = train_poses[labels == i]
+      centroid = np.mean(cluster_points, axis=0)
+      centroids.append(centroid)
+
+  # Find the image closest to each centroid
+  selected_images_indices = []
+  for centroid in centroids:
+      distances = np.linalg.norm(train_poses - centroid, axis=1)
+      closest_image_idx = np.argmin(distances)
+      selected_images_indices.append(closest_image_idx)
+
+  # Highlight the selected camera positions in red
+  selected_positions = train_poses[selected_images_indices]
+
+  plot_3d_camera_positions(train_poses, selected_positions, title, labels, color='red', save_path=save_path)
+
+  return selected_images_indices
+
+
+
 
 # Identify optimal PCA dimension for all the images
 def converge_to_pca_dimensions(embeddings_flattened, min_variance=0.75):
