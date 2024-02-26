@@ -7,7 +7,7 @@ from hdbscan import HDBSCAN
 from matplotlib import pyplot as plt
 from nerf_utils import get_ray_bundle
 from image_encoder import ImageEncoder
-# from pytorch3d.ops import box3d_overlap
+from pytorch3d.ops import box3d_overlap
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import pdist, squareform
@@ -16,9 +16,8 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPI
 import os
 from sklearn.cluster import KMeans
 
-extrinsic_intrinsic_logs_path = f'./logs/extrinsic_vs_intrinsic'
 
-def plot_3d_camera_positions(camera_positions, selected_positions, title, labels = None, color='red', save_path=None):
+def plot_3d_camera_positions(camera_positions, selected_positions, title, labels = None, color='red', dir=f'./logs/extrinsic_vs_intrinsic', save_path=None, show=False):
     """
     camera_positions: The transformation matrices of the cameras from the dataset
     selected_positions: The transformation matrices of the cameras that need to be highlighted
@@ -45,16 +44,17 @@ def plot_3d_camera_positions(camera_positions, selected_positions, title, labels
         ax.add_artist(legend)
 
     if save_path:
-      if not os.path.exists(extrinsic_intrinsic_logs_path):
-        os.makedirs(extrinsic_intrinsic_logs_path)
-      plt.savefig(f"{extrinsic_intrinsic_logs_path}/{save_path}")
+      if not os.path.exists(dir):
+        os.makedirs(dir)
+      plt.savefig(f"{dir}/{save_path}")
 
-    plt.show()
+    if show:
+      plt.show()
 
 
 
 
-def plot_images_as_grid(images_tensor, save_path=None):
+def plot_images_as_grid(images_tensor, dir=f'./logs/extrinsic_vs_intrinsic', save_path=None, show=False):
     
     """
     images: The indices of the images to be plotted
@@ -68,13 +68,14 @@ def plot_images_as_grid(images_tensor, save_path=None):
 
     plt.tight_layout()
     if save_path:
-       if not os.path.exists(extrinsic_intrinsic_logs_path):
-        os.makedirs(extrinsic_intrinsic_logs_path)
-       plt.savefig(f"{extrinsic_intrinsic_logs_path}/{save_path}")
-    plt.show()
+       if not os.path.exists(dir):
+        os.makedirs(dir)
+       plt.savefig(f"{dir}/{save_path}")
+    if show:
+      plt.show()
 
 
-def cluster_poses_by_kmeans(train_poses, title, n_clusters = 10, save_path = None):
+def cluster_poses_by_kmeans(train_poses, title, dir, n_clusters = 10, save_path = None):
   """
   
   """
@@ -99,7 +100,7 @@ def cluster_poses_by_kmeans(train_poses, title, n_clusters = 10, save_path = Non
   # Highlight the selected camera positions in red
   selected_positions = train_poses[selected_images_indices]
 
-  plot_3d_camera_positions(train_poses, selected_positions, title, labels, color='red', save_path=save_path)
+  plot_3d_camera_positions(train_poses, selected_positions, title, labels, color='red', dir=dir, save_path=save_path)
 
   return selected_images_indices
 
@@ -143,7 +144,8 @@ def camera_position_from_extrinsic_matrix(extrinsic_matrix):
     t = extrinsic_matrix[:3, 3]
 
     # Calculate the camera position: C = -R^-1 * t
-    camera_position = -torch.inverse(R) @ t
+    # camera_position = -torch.inverse(R) @ t
+    camera_position = t
     return camera_position
 
 def furthest_view_sampling_k(tform_cam2world, k = 10, seed = 9458):
@@ -329,7 +331,7 @@ def get_box_vertices(pose: torch.Tensor, focal_length: float, height=100, width=
 	
     return box_vertices
 
-def select_frames_from_baseline(images, focal_length, tform_cam2world, baseline = "random", k = 10, seed = 9458):
+def select_frames_from_baseline(images, focal_length, tform_cam2world, baseline = "random", k = 10, seed = 9458, indices = None):
   
   if baseline == "full":
     training_images = images
@@ -352,9 +354,13 @@ def select_frames_from_baseline(images, focal_length, tform_cam2world, baseline 
 
   elif baseline == "min_iou_3d":
       
-      min_iou_3d_indices = select_frames_using_min_3d_iou_greedy(tform_cam2world, focal_length, k, seed)
-      training_images = images[min_iou_3d_indices]
-      training_tforms = tform_cam2world[min_iou_3d_indices]
+    min_iou_3d_indices = select_frames_using_min_3d_iou_greedy(tform_cam2world, focal_length, k, seed)
+    training_images = images[min_iou_3d_indices]
+    training_tforms = tform_cam2world[min_iou_3d_indices]
+
+  elif baseline == "camera_intrinsic":
+    training_images = images[indices, :, :, :]
+    training_tforms = tform_cam2world[indices]
 
   else:
     raise ValueError(f"Invalid strategy i.e. baseline = {baseline}. Valid strategies are: full, random, fvs, min_iou_3d, embedding")
@@ -389,4 +395,4 @@ def calculate_lpips(img1, img2, device):
 
 # Function to calculate SSIM using torchvision
 def calculate_ssim(img1, img2):
-    return SSIM(img1, img2, channel_axis=-1).item()
+    return SSIM(img1, img2, channel_axis=-1, data_range=1.0).item()
