@@ -198,43 +198,28 @@ def select_frames_using_min_3d_iou_greedy(tform_cam2world, focal_length, k = 10,
     training_indices = indices[:1]
     holdout_indices = indices[1:]
 
-    # get box vertices for training and holdout
-    training_tforms = tform_cam2world[training_indices].squeeze()
-    holdout_tforms = tform_cam2world[holdout_indices].squeeze()
-    training_box = get_box_vertices(training_tforms.squeeze(), focal_length)
-    holdout_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in holdout_tforms])
+    for i in range(k-1):
 
-    # calculate 3d iou between training and holdout 
-    _, iou_3d = box3d_overlap(training_box.unsqueeze(0), holdout_boxes)
-    min_iou_index = torch.argmin(iou_3d.squeeze()).item()
-
-    # add new index with minimum 3d iou to training indices
-    training_indices = np.append(training_indices, holdout_indices[min_iou_index])
-    holdout_indices = np.delete(holdout_indices, min_iou_index)
-        
-    for i in range(k-2):
-
-        # get new poses based on minimum 3d iou
+        # get box vertices for training and holdout
         training_tforms = tform_cam2world[training_indices].squeeze()
         holdout_tforms = tform_cam2world[holdout_indices].squeeze()
-        
-        # get box vertices for training and holdout
-        training_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in training_tforms])
-        holdout_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in holdout_tforms])
 
-        # calculate 3d iou between training and holdout
-        _, iou_3d = box3d_overlap(training_boxes, holdout_boxes)
+        # calculate 3d iou between training and holdout 
+        if i == 0:
+            training_box = get_box_vertices(training_tforms.squeeze(), focal_length)
+            holdout_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in holdout_tforms])
+            _, iou_3d = box3d_overlap(training_box.unsqueeze(0), holdout_boxes)
+        else:
+            training_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in training_tforms])
+            holdout_boxes = torch.stack([get_box_vertices(tform.squeeze(), focal_length) for tform in holdout_tforms])
+            _, iou_3d = box3d_overlap(training_boxes, holdout_boxes)
         
-        # get holdout index with minimum 3d iou value for each training box
-        min_iou_values, min_iou_indices = torch.min(iou_3d, dim=1) # torch.Size([training_boxes])
+        sum_iou = iou_3d.sum(dim=0)
+        min_iou_index = torch.argmin(sum_iou.squeeze()).item()
 
-        # get next holdout index with minimum 3d iou value
-        min_iou_value_idx = torch.argmin(min_iou_values).item()
-        min_iou_indices_index = min_iou_indices[min_iou_value_idx].item() # torch.Size([1])
-        
         # add new index with minimum 3d iou to training indices
-        training_indices = np.append(training_indices, holdout_indices[min_iou_indices_index])
-        holdout_indices = np.delete(holdout_indices, min_iou_indices_index)
+        training_indices = np.append(training_indices, holdout_indices[min_iou_index])
+        holdout_indices = np.delete(holdout_indices, min_iou_index)
     
     return training_indices
 
