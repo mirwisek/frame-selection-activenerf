@@ -1,6 +1,8 @@
-# Frame Selection: 3D Scene Reconstruction Project
+# Diverse Frame Selection - 3D Reconstruction with NeRF
 
 The objective of the project is to select frames that maximize pose **DIVERSITY** and help NeRF generalize effectively under **constrained** input budget.
+
+<img src="fig/cover.png" alt="Emoticons icons representing emotions" height="500">
 
 ## Dataset
 
