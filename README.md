@@ -25,7 +25,7 @@ The shell scripts under `jobs_scripts` directory can be utilized to schedule job
 The two main important files are:
 - `baseline_models.py` runs baseline models on the NeRF dataset configured with $k = [5, 10, 15, 20, 25]$
 - `clustering_script.py` runs HDBScan on the NeRF dataset configured with $k = [5, 10, 15, 20, 25]$
-Upon running, these file store results in `logs` directory mostly in `.npz` files. The results including the metrics and graphs need to be explicitly plotted using `plot_logs.ipynb`.
+Upon running, these file store results in `logs` directory mostly in `.npz` files. The results including the metrics and graphs need to be explicitly plotted using `visualize_results.ipynb`.
 
 
 
