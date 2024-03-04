@@ -1,12 +1,3 @@
-
-# %%
-# !pip3 -q install umap-learn
-# !pip3 -q install hdbscan
-# !pip3 -q install lpips
-# !pip3 -q install torchmetrics
-# !pip3 -q install optuna
-
-# %%
 # Import all the good stuff
 import os
 import torch
@@ -14,30 +5,24 @@ import optuna
 import numpy as np
 import matplotlib.pyplot as plt
 
-# %% [markdown]
-# ## A few utility functions
-
-# %%
+# A few utility functions
 from model import VeryTinyNerfModel
 from image_encoder import ImageEncoder
-from data_utils import load_tiny_nerf_data, load_nerf_data, get_focal_length
-from nerf_utils import positional_encoding, get_minibatches, run_one_iter_of_tinynerf
-from utils import select_frames_from_baseline, select_frames_from_clustering, calculate_lpips, calculate_ssim
+from utils.data_utils import load_tiny_nerf_data, load_nerf_data, get_focal_length
+from utils.nerf_utils import positional_encoding, get_minibatches, run_one_iter_of_tinynerf
+from utils.baseline_utils import select_frames_from_baseline, select_frames_from_clustering, calculate_lpips, calculate_ssim
 
 import argparse
 
 # Parse command line arguments
-parser = argparse.ArgumentParser()
-parser.add_argument("-k", "--num_clusters", type=int, default=10, help="Number of clusters")
-args = parser.parse_args()
-
-k = args.num_clusters
-
-# %%
-experiment_data_type = "tiny_nerf"
-#experiment_data_type = "nerf_synthetic"
-nerf_test_subject = "ship" if experiment_data_type == "nerf_synthetic" else "lego" 
-nerf_subjects_list = ['ship', 'drums', 'ficus', 'hotdog', 'lego', 'materials', 'mic']
+parser = argparse.ArgumentParser(description='Clustering arguments')
+parser.add_argument('k', type=int, help='Number of clusters')
+parser.add_argument('exp_type', type=str, help='tiny_nerf or nerf_synthetic')
+# nerf_subjects_list = ['ship', 'drums', 'ficus', 'hotdog', 'lego', 'materials', 'mic']
+parser.add_argument('dataset', type=str, help='Dataset to use')
+k = parser.parse_args().k
+experiment_data_type = parser.parse_args().exp_type
+nerf_test_subject = parser.parse_args().dataset
 
 tiny_data_path = "data/tiny_nerf_data.npz"
 nerf_synthetic_path = "data/nerf_synthetic"
@@ -51,18 +36,12 @@ else:
 if not os.path.exists(logs_path):
     os.makedirs(logs_path)
 
-# %% [markdown]
-# ## Get data
-
-# %%
+# Get data
 # Download sample data used in the official tiny_nerf example
-if not os.path.exists(tiny_data_path):
-    wget -P data/ http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/tiny_nerf_data.npz
+# http://cseweb.ucsd.edu/~viscomp/projects/LF/papers/ECCV20/nerf/tiny_nerf_data.npz
 
-# %% [markdown]
-# ## Load up input images, poses, intrinsics, etc.
+# Load up input images, poses, intrinsics, etc.
 
-# %%
 # Near and far clipping thresholds for depth values.
 near_thresh = 2.
 far_thresh = 6.
@@ -89,10 +68,8 @@ else:
     images = images.to(device)
     tform_cam2world = torch.from_numpy(tform_cam2world[:100,]).to(device)
 
-# %% [markdown]
-# #### Display the image used for testing
+# Display the image used for testing
 
-# %%
 if experiment_data_type == "tiny_nerf":
     fig, axs = plt.subplots(2, 3, figsize=(10, 6))
 else:
@@ -113,14 +90,10 @@ else:
     plt.savefig(f"{logs_path}/test_images_nerf.png")
 plt.show()
 
-# %%
 psnr_vals_dict = {}
 lpips_vals_dict = {}
 ssim_vals_dict = {}
 
-
-
-# %%
 def objective(trial, images, embeddings, tform_cam2world):
     
     # tiny nerf parameters - not being changed
@@ -143,6 +116,7 @@ def objective(trial, images, embeddings, tform_cam2world):
     n_neighbors = trial.suggest_int("n_neighbors", 2, 50)
     min_dist = trial.suggest_float("min_dist", 0.01, 0.99)
     n_components = trial.suggest_int("n_components", 5, 50)
+    metrics = trial.suggest_categorical("metric", ["euclidean", "cosine"])
 
     # hdbscan clustering algorithm params to be tuned
     min_cluster_size = trial.suggest_int("min_cluster_size", 2, 10)
@@ -153,12 +127,12 @@ def objective(trial, images, embeddings, tform_cam2world):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # make a string for the trial name based on the parameters
-    trial_name = f"n_neighbors_{n_neighbors}_min_dist_{min_dist}_n_components_{n_components}_min_cluster_size_{min_cluster_size}_min_samples_{min_samples}"
+    trial_name = f"n_neighbors_{n_neighbors}_min_dist_{min_dist}_n_components_{n_components}_metric_{metrics}_min_cluster_size_{min_cluster_size}_min_samples_{min_samples}"
     
     try:
         diverse_indices = select_frames_from_clustering(embeddings, tform_cam2world, focal_length, 
                                                     device=device, strategy=strategy, k=k, 
-                                                    dim_red_method="umap", umap_params=[n_neighbors, min_dist, n_components],
+                                                    dim_red_method="umap", umap_params=[n_neighbors, min_dist, n_components, metrics],
                                                     min_cluster_size=min_cluster_size, min_samples=min_samples)
     except Exception as e:
         print('Skipping trial due to error: ', e)
@@ -229,13 +203,12 @@ def objective(trial, images, embeddings, tform_cam2world):
     
     return psnr_avg
 
-# %%
 image_encoder = ImageEncoder(device)
 embeddings = image_encoder(images)
 
-# %%
-study = optuna.create_study(study_name=f'{experiment_data_type}-{nerf_test_subject}', direction="maximize")
-study.optimize(lambda trial: objective(trial, images, embeddings, tform_cam2world), n_trials=100, timeout=18000)
+
+study = optuna.create_study(study_name=f'{experiment_data_type}-{nerf_test_subject}-{k}', direction="maximize")
+study.optimize(lambda trial: objective(trial, images, embeddings, tform_cam2world), n_trials=100, timeout=36000)
 
 pruned_trials = study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.PRUNED])
 complete_trials = study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.COMPLETE])
@@ -253,63 +226,3 @@ print("  Value: ", trial.value)
 print("  Params: ")
 for key, value in trial.params.items():
     print("    {}: {}".format(key, value))
-
-# %%
-
-
-# %%
-
-
-# %%
-
-
-# %%
-
-
-def calculate_iou_3d(tform1, tform2, focal_length):
-    boxes1 = get_box_vertices(tform1, focal_length)
-    boxes2 = get_box_vertices(tform2, focal_length)
-    vol, _ = box3d_overlap(boxes1.unsqueeze(0), boxes2.unsqueeze(0))
-    return vol[0].item()
-
-
-def maximal_coverage(tform_cam2world, focal_length, k):
-    n = tform_cam2world.shape[0]
-    
-    # Initialize DP table
-    DP = torch.zeros((n + 1, k + 1))
-    
-    # Build DP table
-    for i in range(1, n + 1):
-        for j in range(1, k + 1):
-            DP[i][j] = float('inf')
-            for l in range(i):
-                DP[i][j] = min(DP[i][j], DP[l][j - 1] + calculate_iou(tform_cam2world, focal_length, i - 1, l))
-
-    # Find the maximum coverage for k images
-    # max_coverage = max(DP[n][k])
-
-    # Traceback to find the selected indices
-    selected_indices = []
-    i, j = n, k
-    while i > 0 and j > 0:
-        if DP[i][j] != DP[i - 1][j]:
-            selected_indices.append(i - 1)
-            j -= 1
-        i -= 1
-
-    return DP, selected_indices
-
-# %%
-
-
-# %%
-
-
-# %%
-
-
-# %%
-
-
-
